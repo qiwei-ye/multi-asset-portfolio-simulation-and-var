@@ -18,6 +18,11 @@ YFINANCE_CACHE_DIR = DATA_DIR / ".yfinance_cache"
 RESULTS_DIR = PROJECT_ROOT / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
 RETRIEVAL_MANIFEST_PATH = RESULTS_DIR / "retrieval_manifest.json"
+TERMINAL_OUTCOMES_PATH = RESULTS_DIR / "terminal_outcomes.csv"
+TERMINAL_DISTRIBUTIONS_PATH = FIGURES_DIR / "terminal_distributions.png"
+ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
+FROZEN_CONFIG_PATH = ARTIFACTS_DIR / "frozen_config.json"
+MATPLOTLIB_CACHE_DIR = PROJECT_ROOT / ".venv" / ".matplotlib"
 
 DATA_START_DATE = date(2022, 9, 1)
 DATA_END_DATE = date(2026, 8, 31)  # Inclusive; never extend coverage silently.
@@ -68,6 +73,7 @@ FACTOR_ORDER = tuple(f"yield_change_{tenor}y" for tenor in YIELD_TENORS_YEARS) +
 ESTIMATION_WINDOW = 500
 ESTIMATE_SAMPLE_MEAN = True
 COVARIANCE_DDOF = 1
+GAUSSIAN_SAMPLING_METHOD = "svd"  # Supports singular sample covariance without jitter.
 BACKTEST_FORECASTS = 250
 MIN_ALIGNED_CHANGES = ESTIMATION_WINDOW + BACKTEST_FORECASTS
 MIN_ALIGNED_LEVELS = MIN_ALIGNED_CHANGES + 1
@@ -139,6 +145,7 @@ def seed_manifest() -> dict[str, object]:
     return {
         "master_seed": MASTER_SEED,
         "bit_generator": "PCG64",
+        "pool_size": _SEED_BRANCHES["forward_simulation"].pool_size,
         "branch_order": list(SEED_BRANCH_NAMES),
         "branches": {
             name: list(seed.spawn_key) for name, seed in _SEED_BRANCHES.items()

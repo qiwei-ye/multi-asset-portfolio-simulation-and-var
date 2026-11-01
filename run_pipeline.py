@@ -1,13 +1,16 @@
-"""Run the implemented data preparation and fixed-holding valuation stages."""
+"""Run preparation, fixed-holding valuation, and the joint forward simulation."""
 
 import pandas as pd
 
 from portfolio_var import config
 from portfolio_var.data import DataError, load_and_prepare
 from portfolio_var.pricing import initialize_portfolios, value_holdings
+from portfolio_var.reporting import write_frozen_config, write_terminal_reports
+from portfolio_var.simulation import simulate_forward
 
 
 def main() -> None:
+    write_frozen_config()
     prepared = load_and_prepare()
     portfolios = initialize_portfolios(prepared.levels)
     print(
@@ -22,6 +25,11 @@ def main() -> None:
         )
         print(f"{name.capitalize()} inception {holdings.inception_date}: USD {values.sum():,.2f} across {len(values)} fixed holdings.")
     print(f"Retrieval provenance and alignment: {config.RETRIEVAL_MANIFEST_PATH.relative_to(config.PROJECT_ROOT)}")
+    simulation = simulate_forward(prepared.levels, prepared.factors, portfolios["forward"])
+    write_terminal_reports(simulation)
+    print(f"Simulated {len(simulation.portfolio_values):,} joint paths over {simulation.steps} trading steps.")
+    for path in (config.TERMINAL_OUTCOMES_PATH, config.TERMINAL_DISTRIBUTIONS_PATH, config.FROZEN_CONFIG_PATH):
+        print(f"Saved {path.relative_to(config.PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":

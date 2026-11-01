@@ -1,4 +1,4 @@
-"""Consolidated preparation and valuation tests; fixtures are synthetic, not inputs."""
+"""Consolidated correctness tests; fixtures are synthetic, not retained inputs."""
 
 from datetime import date
 import hashlib
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from portfolio_var import config, data, pricing
+from portfolio_var import config, data, pricing, reporting, simulation
 
 
 def input_frames(dates=None):
@@ -313,6 +313,153 @@ class PricingTests(unittest.TestCase):
     def test_short_history_cannot_select_a_retrospective_origin(self):
         with self.assertRaisesRegex(ValueError, "751"):
             pricing.initialize_portfolios(self.levels)
+
+
+class SimulationTests(unittest.TestCase):
+    def setUp(self):
+        paths = patch.object(config, "SIMULATION_PATHS", 3)
+        paths.start()
+        self.addCleanup(paths.stop)
+        treasury, etfs = input_frames(pd.bdate_range("2022-09-01", periods=751))
+        self.prepared = data.prepare_data(treasury, etfs)
+        self.holdings = pricing.initialize_portfolios(self.prepared.levels)["forward"]
+
+    def run_simulation(self, factors=None):
+        return simulation.simulate_forward(
+            self.prepared.levels,
+            self.prepared.factors if factors is None else factors,
+            self.holdings,
+        )
+
+    def test_gaussian_estimates_use_sample_mean_and_n_minus_one_covariance(self):
+        values = np.arange(8)[None, :] + np.array([0, 1, 3])[:, None]
+        window = pd.DataFrame(values, columns=config.FACTOR_ORDER)
+        mean, covariance = simulation.fit_gaussian(window)
+        np.testing.assert_allclose(mean, np.arange(8) + 4 / 3)
+        np.testing.assert_allclose(covariance, np.full((8, 8), 7 / 3))
+
+    def test_gaussian_fit_rejects_wrong_factor_order_and_nonfinite_shocks(self):
+        window = self.prepared.factors.iloc[-500:].copy()
+        with self.assertRaisesRegex(ValueError, "ordering"):
+            simulation.fit_gaussian(window.iloc[:, ::-1])
+        window.iloc[0, 0] = np.inf
+        with self.assertRaisesRegex(ValueError, "finite"):
+            simulation.fit_gaussian(window)
+
+    def test_daily_joint_shocks_accumulate_before_full_terminal_repricing(self):
+        daily = np.zeros((3, 252, 8))
+        first = np.array([0.001, 0.002, 0.003, 0.004, 0.005, 0.006, math.log(1.1), math.log(0.9)])
+        last = np.array([-0.0001, -0.0002, -0.0003, -0.0004, -0.0005, -0.0006, math.log(1.2), math.log(1.05)])
+        daily[0, 0], daily[0, -1] = first, last
+        daily[1, 15], daily[2, 125] = -first, last
+        rng = Mock()
+        rng.multivariate_normal.return_value = daily
+        with patch.object(config, "simulation_rng", return_value=rng):
+            result = self.run_simulation()
+        expected_shocks = np.stack([first + last, -first, last])
+        np.testing.assert_allclose(result.cumulative_shocks, expected_shocks, atol=1e-16)
+        self.assertEqual(rng.multivariate_normal.call_args.kwargs["size"], (3, 252))
+        self.assertEqual(result.steps, 252)
+        origin = self.prepared.levels.iloc[-1]
+        curve = origin[list(config.TREASURY_SERIES.values())].to_numpy()
+        expected_prices = []
+        for shocks in expected_shocks:
+            bonds = [math.exp(-(curve[i] + shocks[i]) * maturity) for i, maturity in zip((0, 2, 4), (1, 4, 9))]
+            etfs = [origin[f"{ticker}_Close"] * math.exp(shocks[6 + i]) for i, ticker in enumerate(("LQD", "SPY"))]
+            expected_prices.append([*bonds, *etfs])
+        expected_values = np.array(expected_prices) * np.asarray(self.holdings.quantities)
+        np.testing.assert_allclose(result.terminal_prices, expected_prices, rtol=1e-12)
+        np.testing.assert_allclose(result.position_values, expected_values, rtol=1e-12)
+        np.testing.assert_allclose(result.position_returns, expected_values / [100_000, 100_000, 100_000, 300_000, 400_000] - 1, atol=1e-14)
+        np.testing.assert_array_equal(result.portfolio_values, result.position_values.sum(axis=1))
+        np.testing.assert_allclose(result.portfolio_returns, expected_values.sum(axis=1) / 1_000_000 - 1, atol=1e-14)
+
+    def test_calibration_uses_only_the_latest_500_aligned_changes(self):
+        original = self.run_simulation()
+        changed = self.prepared.factors.copy()
+        changed.iloc[:-500] = 1000
+        repeated = self.run_simulation(changed)
+        self.assertTrue(original.calibration_dates.equals(self.prepared.factors.index[-500:]))
+        np.testing.assert_array_equal(original.daily_mean, repeated.daily_mean)
+        np.testing.assert_array_equal(original.daily_covariance, repeated.daily_covariance)
+        np.testing.assert_array_equal(original.position_values, repeated.position_values)
+
+    def test_simulation_is_repeatable_independently_of_forecast_execution(self):
+        first = self.run_simulation()
+        for day in (date(2026, 8, 31), date(2024, 2, 29), date(2022, 9, 1)):
+            config.parametric_var_rng(day).standard_normal((100, 8))
+        second = self.run_simulation()
+        np.testing.assert_array_equal(first.cumulative_shocks, second.cumulative_shocks)
+        np.testing.assert_array_equal(first.terminal_prices, second.terminal_prices)
+        np.testing.assert_array_equal(first.portfolio_values, second.portfolio_values)
+
+    def test_forward_simulation_rejects_a_retrospective_inception(self):
+        retrospective = pricing.initialize_portfolios(self.prepared.levels)["retrospective"]
+        with self.assertRaisesRegex(ValueError, "latest aligned"):
+            simulation.simulate_forward(self.prepared.levels, self.prepared.factors, retrospective)
+
+    def test_forward_calibration_requires_500_matched_changes(self):
+        with self.assertRaisesRegex(ValueError, "500 aligned changes"):
+            simulation.simulate_forward(self.prepared.levels.iloc[-500:], self.prepared.factors.iloc[-499:], self.holdings)
+        with self.assertRaisesRegex(ValueError, "Factor dates"):
+            self.run_simulation(self.prepared.factors.iloc[:-1])
+
+    def test_saved_standalone_outcomes_and_totals_share_identical_scenarios(self):
+        result = self.run_simulation()
+        table = reporting.terminal_outcomes(result)
+        self.assertEqual(table.index.tolist(), [1, 2, 3])
+        for i, asset in enumerate(config.ASSETS):
+            np.testing.assert_array_equal(table[f"{asset}_terminal_price"], result.terminal_prices[:, i])
+            np.testing.assert_array_equal(table[f"{asset}_terminal_value_usd"], result.position_values[:, i])
+            np.testing.assert_array_equal(table[f"{asset}_return"], result.position_returns[:, i])
+        component_columns = [f"{asset}_terminal_value_usd" for asset in config.ASSETS]
+        np.testing.assert_array_equal(table[component_columns].sum(axis=1), table["portfolio_terminal_value_usd"])
+        np.testing.assert_allclose(table["portfolio_return"], table["portfolio_terminal_value_usd"] / 1_000_000 - 1, atol=1e-14)
+        with tempfile.TemporaryDirectory(prefix="portfolio-report-test-", dir=config.PROJECT_ROOT / ".venv") as temporary:
+            path = Path(temporary) / "terminal.csv"
+            with patch.object(config, "TERMINAL_OUTCOMES_PATH", path), patch.object(reporting, "plot_terminal_distributions"):
+                reporting.write_terminal_reports(result)
+            reloaded = pd.read_csv(path, index_col="path_id")
+            np.testing.assert_array_equal(reloaded.to_numpy(), table.to_numpy())
+
+
+class RandomnessTests(unittest.TestCase):
+    def test_forecast_streams_ignore_order_subsets_and_simulation_consumption(self):
+        dates = (date(2022, 9, 1), date(2024, 2, 29), date(2026, 8, 31))
+        expected = {day: config.parametric_var_rng(day).standard_normal(32) for day in dates}
+        for day in reversed(dates):
+            config.simulation_rng().standard_normal(200)
+            np.testing.assert_array_equal(expected[day], config.parametric_var_rng(day).standard_normal(32))
+        self.assertFalse(np.array_equal(expected[dates[0]], expected[dates[1]]))
+
+    def test_frozen_config_uses_effective_settings_and_reconstructs_every_named_seed(self):
+        with tempfile.TemporaryDirectory(prefix="portfolio-config-test-", dir=config.PROJECT_ROOT / ".venv") as temporary:
+            path = Path(temporary) / "frozen_config.json"
+            with patch.object(config, "FROZEN_CONFIG_PATH", path), patch.object(config, "SIMULATION_PATHS", 11):
+                reporting.write_frozen_config()
+                contents = path.read_bytes()
+                path.write_text('{"settings": {"SIMULATION_PATHS": -1}}', encoding="utf-8")
+                reporting.write_frozen_config()
+                self.assertEqual(path.read_bytes(), contents)
+            frozen = json.loads(contents)
+        self.assertEqual(frozen["authority"], "portfolio_var/config.py")
+        self.assertEqual(frozen["settings"]["SIMULATION_PATHS"], 11)
+        self.assertEqual(frozen["settings"]["DATA_START_DATE"], "2022-09-01")
+        self.assertEqual(frozen["settings"]["PROJECT_ROOT"], ".")
+        self.assertEqual(frozen["settings"]["TREASURY_SNAPSHOT_PATH"], "data/treasury_yields.csv")
+        plan = frozen["randomness"]
+        self.assertEqual(plan["master_seed"], 42)
+        self.assertEqual(plan["branches"], {"forward_simulation": [0], "parametric_var": [1]})
+        seed = np.random.SeedSequence(plan["master_seed"], spawn_key=tuple(plan["branches"]["forward_simulation"]), pool_size=plan["pool_size"])
+        restored = np.random.Generator(np.random.PCG64(seed))
+        np.testing.assert_array_equal(restored.standard_normal(32), config.simulation_rng().standard_normal(32))
+        assignments = plan["parametric_var_by_forecast_date"]
+        self.assertEqual(len(assignments), 1461)
+        self.assertEqual(sorted(assignments), frozen["settings"]["FORECAST_SEED_DATES"])
+        for day, spawn_key in assignments.items():
+            seed = np.random.SeedSequence(plan["master_seed"], spawn_key=tuple(spawn_key), pool_size=plan["pool_size"])
+            restored = np.random.Generator(np.random.PCG64(seed))
+            np.testing.assert_array_equal(restored.standard_normal(8), config.parametric_var_rng(date.fromisoformat(day)).standard_normal(8))
 
 
 if __name__ == "__main__":
