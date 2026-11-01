@@ -1,0 +1,2 @@
+# Keep the raw Federal Reserve response identical to its recorded SHA-256.
+/data/treasury_yields.csv -text

@@ -31,5 +31,7 @@ __pycache__/
 build/
 dist/
 
-# Retained input snapshots stay local until redistribution is established.
-/data/
+# Publish only the Federal Reserve snapshot (public domain with attribution).
+# Yahoo Finance forbids redistribution; ETF prices and local caches stay local.
+/data/*
+!/data/treasury_yields.csv

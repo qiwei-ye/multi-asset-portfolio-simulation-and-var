@@ -12,13 +12,19 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-SNAPSHOTS_DIR = DATA_DIR / "snapshots"
+TREASURY_SNAPSHOT_PATH = DATA_DIR / "treasury_yields.csv"
+ETF_SNAPSHOT_PATH = DATA_DIR / "etf_prices.csv"
+YFINANCE_CACHE_DIR = DATA_DIR / ".yfinance_cache"
 RESULTS_DIR = PROJECT_ROOT / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
+RETRIEVAL_MANIFEST_PATH = RESULTS_DIR / "retrieval_manifest.json"
 
 DATA_START_DATE = date(2022, 9, 1)
 DATA_END_DATE = date(2026, 8, 31)  # Inclusive; never extend coverage silently.
 TREASURY_DATA_SOURCE = "Federal Reserve fitted zero-coupon yields"
+TREASURY_DATA_URL = "https://www.federalreserve.gov/data/yield-curve-tables/feds200628.csv"
+TREASURY_SOURCE_URL = "https://www.federalreserve.gov/data/nominal-yield-curve.htm"
+TREASURY_RIGHTS_URL = "https://www.federalreserve.gov/disclaimer.htm"
 TREASURY_SERIES = {
     1: "SVENY01",
     2: "SVENY02",
@@ -33,7 +39,14 @@ YIELD_INTERPOLATION = "linear"
 ETF_DATA_SOURCE = "Yahoo Finance"
 ETF_TICKERS = ("LQD", "SPY")
 ETF_PRICE_FIELDS = ("Close", "Adj Close")
+ETF_LEVEL_COLUMNS = tuple(
+    f"{ticker}_{field}" for ticker in ETF_TICKERS for field in ETF_PRICE_FIELDS
+)
 YFINANCE_AUTO_ADJUST = False  # Retain both quoted Close and Adj Close.
+ETF_RIGHTS_URL = "https://help.yahoo.com/kb/SLN2310.html"
+YFINANCE_DOCUMENTATION_URL = "https://ranaroussi.github.io/yfinance/"
+SOURCE_PERMISSIONS_REVIEW_DATE = date(2026, 10, 31)
+DOWNLOAD_TIMEOUT_SECONDS = 30
 
 INITIAL_CAPITAL_USD = 1_000_000.0
 INITIAL_BOND_MATURITIES_YEARS = {"UST_2Y": 2.0, "UST_5Y": 5.0, "UST_10Y": 10.0}
