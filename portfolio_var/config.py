@@ -20,6 +20,11 @@ FIGURES_DIR = RESULTS_DIR / "figures"
 RETRIEVAL_MANIFEST_PATH = RESULTS_DIR / "retrieval_manifest.json"
 TERMINAL_OUTCOMES_PATH = RESULTS_DIR / "terminal_outcomes.csv"
 TERMINAL_DISTRIBUTIONS_PATH = FIGURES_DIR / "terminal_distributions.png"
+BACKTEST_PATH = RESULTS_DIR / "backtest.csv"
+COVERAGE_TESTS_PATH = RESULTS_DIR / "coverage_tests.csv"
+DIVERSIFICATION_PATH = RESULTS_DIR / "diversification.csv"
+EULER_CONTRIBUTIONS_PATH = RESULTS_DIR / "euler_contributions.csv"
+VAR_BACKTEST_FIGURE_PATH = FIGURES_DIR / "var_backtest.png"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 FROZEN_CONFIG_PATH = ARTIFACTS_DIR / "frozen_config.json"
 MATPLOTLIB_CACHE_DIR = PROJECT_ROOT / ".venv" / ".matplotlib"
@@ -91,10 +96,13 @@ TERMINAL_BOND_MATURITIES_YEARS = {
 # Standalone outcomes are marginals of the same joint simulation.
 VAR_HORIZON_STEPS = 1
 VAR_CONFIDENCE = 0.99
+RISK_METHODS = ("parametric", "historical")
 PARAMETRIC_SCENARIOS = 10_000
 HISTORICAL_SCENARIOS = ESTIMATION_WINDOW  # Joint observed shocks, not recentered.
 QUANTILE_METHOD = "linear"
 TEST_SIGNIFICANCE = 0.05
+COVERAGE_LIKELIHOOD_CONVENTION = "Kupiec uses all forecasts; Christoffersen conditions on the first indicator."
+LATEST_RISK_CONVENTION = "Latest matched backtest forecast, identified by origin and target dates."
 
 MASTER_SEED = 42
 # Append new branch names; never reorder these assignments.

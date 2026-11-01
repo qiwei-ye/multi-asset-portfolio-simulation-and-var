@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from portfolio_var import config, data, pricing, reporting, simulation
+from portfolio_var import config, data, pricing, reporting, risk, simulation
 
 
 def input_frames(dates=None):
@@ -460,6 +460,265 @@ class RandomnessTests(unittest.TestCase):
             seed = np.random.SeedSequence(plan["master_seed"], spawn_key=tuple(spawn_key), pool_size=plan["pool_size"])
             restored = np.random.Generator(np.random.PCG64(seed))
             np.testing.assert_array_equal(restored.standard_normal(8), config.parametric_var_rng(date.fromisoformat(day)).standard_normal(8))
+
+
+class RiskMathTests(unittest.TestCase):
+    def test_linear_quantile_records_its_same_ordered_scenarios_and_weights(self):
+        losses = np.array([9.0, 1.0, 8.0, 4.0])
+        quantile = risk.empirical_quantile(losses)
+        self.assertAlmostEqual(quantile.value, 8.97)
+        self.assertEqual((quantile.lower_scenario, quantile.upper_scenario), (2, 0))
+        self.assertEqual((quantile.lower_rank, quantile.upper_rank), (2, 3))
+        self.assertAlmostEqual(quantile.upper_weight, 0.97)
+        for probability in (0, 0.25, 0.5, 0.99, 1):
+            with self.subTest(probability=probability):
+                self.assertAlmostEqual(risk.empirical_quantile(losses, probability).value, float(np.quantile(losses, probability, method="linear")))
+
+    def test_signed_singleton_and_tied_quantiles_are_preserved(self):
+        self.assertAlmostEqual(risk.empirical_quantile([-5, -4, -3, -2]).value, -2.03)
+        singleton = risk.empirical_quantile([-7])
+        self.assertEqual((singleton.value, singleton.lower_scenario, singleton.upper_scenario, singleton.upper_weight), (-7, 0, 0, 0))
+        tied = risk.empirical_quantile([3, 3, 3, 3])
+        self.assertTrue(tied.boundary_tie)
+        self.assertEqual((tied.lower_scenario, tied.upper_scenario), (2, 3))
+        self.assertEqual(tied.value, 3)
+
+    def test_invalid_quantile_inputs_fail_visibly(self):
+        for losses in ([], [1, np.nan], [1, np.inf], [[1, 2]]):
+            with self.subTest(losses=losses), self.assertRaises(ValueError):
+                risk.empirical_quantile(losses)
+        for probability in (-0.1, 1.1, np.nan):
+            with self.subTest(probability=probability), self.assertRaises(ValueError):
+                risk.empirical_quantile([1, 2], probability)
+
+    def test_exception_boundary_is_strict_even_one_float_above_var(self):
+        value = risk.empirical_quantile([1, 2, 3, 4]).value
+        np.testing.assert_array_equal(
+            risk.exception_flags([value, np.nextafter(value, np.inf), np.nextafter(value, -np.inf)], value),
+            [False, True, False],
+        )
+
+    def test_euler_uses_portfolio_order_and_retains_signed_components(self):
+        losses = np.array([[10, -3, 0, -1, 3], [1, 2, 0, 0, 0], [-2, 9, 0, 1, 0], [4, -1, 1, 0, 0]], dtype=float)
+        quantile = risk.empirical_quantile(losses.sum(axis=1))
+        contributions = risk.euler_contributions(losses, quantile)
+        self.assertEqual((quantile.lower_scenario, quantile.upper_scenario), (2, 0))
+        np.testing.assert_allclose(contributions, [9.64, -2.64, 0, -0.94, 2.91], atol=1e-14)
+        self.assertAlmostEqual(float(contributions.sum()), 8.97)
+        quantities = np.array([2, 3, 5, 7, 11], dtype=float)
+        unit_losses = losses / quantities
+        for i in range(5):
+            changed = quantities.copy()
+            changed[i] *= 1 + 1e-6
+            perturbed_var = risk.empirical_quantile((unit_losses * changed).sum(axis=1)).value
+            self.assertAlmostEqual((perturbed_var - quantile.value) / 1e-6, contributions[i], places=7)
+
+    def test_euler_ties_follow_stable_scenario_order_and_still_reconcile(self):
+        losses = np.array([[5, -4], [-2, 3], [9, -8], [2, -1]], dtype=float)
+        quantile = risk.empirical_quantile(losses.sum(axis=1))
+        contributions = risk.euler_contributions(losses, quantile)
+        self.assertTrue(quantile.boundary_tie)
+        np.testing.assert_allclose(contributions, [2.21, -1.21])
+        self.assertAlmostEqual(float(contributions.sum()), quantile.value)
+
+
+class CoverageTests(unittest.TestCase):
+    def test_coverage_likelihoods_match_independent_hand_calculations(self):
+        result = risk.coverage_tests([0, 0, 1, 0, 1, 1, 0]).set_index("test")
+        p = 0.01
+        uc = 2 * (3 * math.log(3 / 7) + 4 * math.log(4 / 7) - 3 * math.log(p) - 4 * math.log(1 - p))
+        markov = 2 * math.log(1 / 3) + 4 * math.log(2 / 3)
+        independence = 2 * (markov - 6 * math.log(0.5))
+        conditioned_uc = 2 * (6 * math.log(0.5) - 3 * math.log(p) - 3 * math.log(1 - p))
+        conditional = 2 * (markov - 3 * math.log(p) - 3 * math.log(1 - p))
+        for name, statistic, degrees in (
+            ("kupiec_unconditional", uc, 1),
+            ("christoffersen_independence", independence, 1),
+            ("christoffersen_conditional", conditional, 2),
+        ):
+            row = result.loc[name]
+            self.assertAlmostEqual(row["statistic"], statistic)
+            expected_p = math.erfc(math.sqrt(statistic / 2)) if degrees == 1 else math.exp(-statistic / 2)
+            self.assertAlmostEqual(row["p_value"], expected_p)
+            self.assertEqual(row["reject"], expected_p < 0.05)
+            self.assertFalse(row["undefined"])
+            self.assertEqual((row["n00"], row["n01"], row["n10"], row["n11"]), (1, 2, 2, 1))
+        self.assertAlmostEqual(result.loc["christoffersen_conditional", "conditioned_uc_statistic"], conditioned_uc)
+        self.assertAlmostEqual(conditional, conditioned_uc + independence)
+        self.assertNotAlmostEqual(conditional, uc + independence)
+        self.assertEqual(result.loc["kupiec_unconditional", "likelihood_observations"], 7)
+        self.assertEqual(result.loc["christoffersen_conditional", "likelihood_observations"], 6)
+
+    def test_zero_exception_likelihood_is_finite_and_markov_tests_undefined(self):
+        result = risk.coverage_tests(np.zeros(250, dtype=bool)).set_index("test")
+        uc = result.loc["kupiec_unconditional"]
+        self.assertAlmostEqual(uc["statistic"], -500 * math.log(0.99))
+        self.assertAlmostEqual(uc["p_value"], math.erfc(math.sqrt(uc["statistic"] / 2)))
+        self.assertEqual(uc["exception_count"], 0)
+        self.assertFalse(uc["undefined"])
+        for name in ("christoffersen_independence", "christoffersen_conditional"):
+            self.assertTrue(result.loc[name, "undefined"])
+            self.assertTrue(pd.isna(result.loc[name, "statistic"]))
+            self.assertTrue(pd.isna(result.loc[name, "p_value"]))
+            self.assertEqual(result.loc[name, "decision"], "undefined")
+            self.assertTrue(pd.isna(result.loc[name, "reject"]))
+
+    def test_all_exception_boundary_likelihood_is_finite(self):
+        result = risk.coverage_tests(np.ones(250, dtype=bool)).set_index("test")
+        self.assertAlmostEqual(result.loc["kupiec_unconditional", "statistic"], -500 * math.log(0.01))
+        self.assertTrue(np.isfinite(result.loc["kupiec_unconditional", "statistic"]))
+        self.assertTrue(result.loc["christoffersen_independence", "undefined"])
+
+    def test_zero_transition_cells_use_limits_when_both_states_are_identifiable(self):
+        result = risk.coverage_tests([0, 1, 0, 1]).set_index("test")
+        expected_independence = -2 * (2 * math.log(2 / 3) + math.log(1 / 3))
+        self.assertAlmostEqual(result.loc["christoffersen_independence", "statistic"], expected_independence)
+        self.assertAlmostEqual(result.loc["christoffersen_conditional", "statistic"], -2 * (2 * math.log(0.01) + math.log(0.99)))
+        self.assertFalse(result["undefined"].any())
+        self.assertEqual(result.loc["christoffersen_independence", "n00"], 0)
+        self.assertEqual(result.loc["christoffersen_independence", "n11"], 0)
+
+    def test_first_and_last_only_exceptions_have_different_identifiability(self):
+        last_only = risk.coverage_tests([0, 0, 1]).set_index("test")
+        first_only = risk.coverage_tests([1, 0, 0]).set_index("test")
+        self.assertTrue(last_only.loc["christoffersen_independence", "undefined"])
+        self.assertFalse(first_only.loc["christoffersen_independence", "undefined"])
+        self.assertEqual(first_only.loc["christoffersen_independence", "statistic"], 0)
+        self.assertEqual(first_only.loc["christoffersen_independence", "p_value"], 1)
+
+    def test_empty_and_single_indicator_sequences_report_undefined_tests(self):
+        empty = risk.coverage_tests([])
+        self.assertTrue(empty["undefined"].all())
+        self.assertTrue(empty["statistic"].isna().all())
+        single = risk.coverage_tests([False]).set_index("test")
+        self.assertFalse(single.loc["kupiec_unconditional", "undefined"])
+        self.assertTrue(single.loc["christoffersen_conditional", "undefined"])
+
+    def test_nonbinary_or_multidimensional_indicators_are_rejected(self):
+        for flags in ([0, 2], [0, np.nan], [[0, 1]]):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                risk.coverage_tests(flags)
+
+
+class RollingRiskTests(unittest.TestCase):
+    def setUp(self):
+        settings = patch.multiple(config, ESTIMATION_WINDOW=3, BACKTEST_FORECASTS=3, MIN_ALIGNED_CHANGES=6, MIN_ALIGNED_LEVELS=7, PARAMETRIC_SCENARIOS=7, HISTORICAL_SCENARIOS=3)
+        settings.start()
+        self.addCleanup(settings.stop)
+        self.treasury, self.etfs = input_frames(pd.bdate_range("2024-01-02", periods=7))
+        self.prepared = data.prepare_data(self.treasury, self.etfs)
+        self.holdings = pricing.initialize_portfolios(self.prepared.levels)["retrospective"]
+
+    def run_risk(self, prepared=None):
+        prepared = self.prepared if prepared is None else prepared
+        return risk.rolling_risk(prepared.levels, prepared.factors, self.holdings)
+
+    def test_rolling_windows_include_origin_change_and_exclude_target(self):
+        with patch.object(risk, "fit_gaussian", wraps=simulation.fit_gaussian) as fitted:
+            result = self.run_risk()
+        self.assertEqual(fitted.call_count, 3)
+        self.assertEqual(len(result.backtest), 36)
+        for offset, call in enumerate(fitted.call_args_list):
+            expected = self.prepared.factors.iloc[offset:offset + 3]
+            pd.testing.assert_frame_equal(call.args[0], expected)
+        first = result.backtest.iloc[0]
+        self.assertEqual(first["origin_date"], "2024-01-05")
+        self.assertEqual(first["forecast_date"], "2024-01-08")
+        self.assertEqual(first["calibration_end_date"], first["origin_date"])
+        self.assertEqual(first["elapsed_trading_steps"], 0)
+        self.assertTrue((result.backtest["calibration_end_date"] < result.backtest["forecast_date"]).all())
+        self.assertTrue((result.backtest["calibration_changes"] == 3).all())
+
+    def test_historical_joint_shocks_are_used_without_recentering_or_resampling(self):
+        with patch.object(risk, "scenario_losses", wraps=risk.scenario_losses) as applied:
+            result = self.run_risk()
+        for offset in range(3):
+            historical_call = applied.call_args_list[2 * offset + 1]
+            np.testing.assert_array_equal(historical_call.args[2], self.prepared.factors.iloc[offset:offset + 3].to_numpy())
+            self.assertEqual(historical_call.args[3], offset)
+        origin = self.prepared.levels.iloc[3]
+        curve = origin[list(config.TREASURY_SERIES.values())].to_numpy()
+        expected = []
+        for shock in self.prepared.factors.iloc[:3].to_numpy():
+            next_curve = curve + shock[:6]
+            rates = [next_curve[right] - (next_curve[right] - next_curve[left]) / 252 for left, right in ((0, 1), (2, 3), (4, 5))]
+            faces = self.holdings.quantities[:3]
+            bonds = [100_000 - face * math.exp(-rate * (maturity - 1 / 252)) for face, rate, maturity in zip(faces, rates, (2, 5, 10))]
+            expected.append([*bonds, 300_000 * (1 - math.exp(shock[6])), 400_000 * (1 - math.exp(shock[7]))])
+        expected = np.asarray(expected)
+        first = result.backtest.loc[(result.backtest["method"] == "historical") & (result.backtest["forecast_date"] == "2024-01-08")]
+        np.testing.assert_allclose(first["var_usd"].to_numpy(), np.quantile(np.column_stack([expected, expected.sum(axis=1)]), 0.99, axis=0, method="linear"), rtol=1e-10, atol=1e-8)
+
+    def test_future_levels_and_changes_do_not_affect_first_forecast(self):
+        original = self.run_risk()
+        treasury, etfs = self.treasury.copy(), self.etfs.copy()
+        treasury.iloc[4:] += 1.0
+        etfs.loc[etfs.index[4:], ["LQD_Adj Close", "SPY_Adj Close"]] *= 1.2
+        changed = self.run_risk(data.prepare_data(treasury, etfs))
+        first_date = "2024-01-08"
+        first = original.backtest.loc[original.backtest["forecast_date"] == first_date]
+        repeated = changed.backtest.loc[changed.backtest["forecast_date"] == first_date]
+        np.testing.assert_array_equal(first["var_usd"], repeated["var_usd"])
+        self.assertFalse(np.array_equal(first["realized_loss_usd"], repeated["realized_loss_usd"]))
+
+    def test_realized_losses_reprice_actual_next_levels_with_identical_aging(self):
+        result = self.run_risk()
+        quantities = self.holdings.quantities
+        for offset in range(3):
+            origin_index, target_index = 3 + offset, 4 + offset
+            actual_shock = self.prepared.factors.iloc[target_index - 1].to_numpy()[None, :]
+            realized = risk.scenario_losses(self.holdings, self.prepared.levels.iloc[origin_index], actual_shock, offset)[0]
+            rows = result.backtest.loc[(result.backtest["method"] == "parametric") & (result.backtest["forecast_date"] == self.prepared.levels.index[target_index].date().isoformat())]
+            np.testing.assert_allclose(rows["realized_loss_usd"], np.append(realized, realized.sum()), atol=1e-8)
+            np.testing.assert_allclose(rows["realized_pnl_usd"], -rows["realized_loss_usd"])
+        self.assertEqual(self.holdings.quantities, quantities)
+        self.assertEqual(len(result.coverage_tests), 36)
+        self.assertTrue((result.coverage_tests["forecasts"] == 3).all())
+
+    def test_diversification_and_euler_refer_to_latest_matched_joint_forecast(self):
+        result = self.run_risk()
+        for _, row in result.diversification.iterrows():
+            latest = result.backtest.loc[(result.backtest["method"] == row["method"]) & (result.backtest["forecast_date"] == row["forecast_date"])]
+            self.assertEqual(row["forecast_date"], "2024-01-10")
+            self.assertAlmostEqual(row["portfolio_var_usd"], latest.loc[latest["asset"] == "portfolio", "var_usd"].iloc[0])
+            self.assertAlmostEqual(row["sum_standalone_var_usd"], latest.loc[latest["asset"] != "portfolio", "var_usd"].sum())
+            self.assertAlmostEqual(row["diversification_benefit_usd"], row["sum_standalone_var_usd"] - row["portfolio_var_usd"])
+        euler = result.euler_contributions
+        self.assertEqual(tuple(euler["asset"]), config.ASSETS)
+        np.testing.assert_allclose(euler["contribution_usd"], euler["lower_component_loss_usd"] + euler["upper_weight"] * (euler["upper_component_loss_usd"] - euler["lower_component_loss_usd"]))
+        self.assertAlmostEqual(euler["contribution_usd"].sum(), euler["portfolio_var_usd"].iloc[0])
+        self.assertTrue(euler["reconciled"].all())
+        self.assertTrue((euler["contribution_usd"] < 0).any())
+
+    def test_zero_standalone_sum_has_an_explicitly_undefined_diversification_fraction(self):
+        with patch.object(risk, "scenario_losses", side_effect=lambda holdings, origin, shocks, elapsed: np.zeros((len(shocks), 5))):
+            result = self.run_risk()
+        self.assertTrue(result.diversification["diversification_fraction"].isna().all())
+        self.assertFalse(result.diversification["fraction_defined"].any())
+        self.assertTrue(result.euler_contributions["reconciled"].all())
+
+    def test_rolling_randomness_ignores_forward_stage_execution(self):
+        first = self.run_risk()
+        config.simulation_rng().standard_normal((1000, 8))
+        second = self.run_risk()
+        pd.testing.assert_frame_equal(first.backtest, second.backtest)
+        pd.testing.assert_frame_equal(first.euler_contributions, second.euler_contributions)
+
+    def test_risk_tables_round_trip_with_explicit_undefined_test_flags(self):
+        result = self.run_risk()
+        with tempfile.TemporaryDirectory(prefix="portfolio-risk-test-", dir=config.PROJECT_ROOT / ".venv") as temporary:
+            root = Path(temporary)
+            paths = {"BACKTEST_PATH": root / "backtest.csv", "COVERAGE_TESTS_PATH": root / "coverage_tests.csv", "DIVERSIFICATION_PATH": root / "diversification.csv", "EULER_CONTRIBUTIONS_PATH": root / "euler_contributions.csv"}
+            with patch.multiple(config, **paths), patch.object(reporting, "plot_var_backtest"):
+                reporting.write_risk_reports(result)
+            reloaded = pd.read_csv(paths["COVERAGE_TESTS_PATH"])
+            undefined = reloaded.loc[reloaded["undefined"]]
+            self.assertTrue(undefined["statistic"].isna().all())
+            self.assertTrue(undefined["p_value"].isna().all())
+            self.assertTrue((undefined["decision"] == "undefined").all())
+            saved = pd.read_csv(paths["BACKTEST_PATH"])
+            np.testing.assert_array_equal(saved["var_usd"], result.backtest["var_usd"])
+            np.testing.assert_array_equal(saved["exception"], result.backtest["exception"])
 
 
 if __name__ == "__main__":

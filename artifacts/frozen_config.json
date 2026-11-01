@@ -12,6 +12,11 @@
     "RETRIEVAL_MANIFEST_PATH": "results/retrieval_manifest.json",
     "TERMINAL_OUTCOMES_PATH": "results/terminal_outcomes.csv",
     "TERMINAL_DISTRIBUTIONS_PATH": "results/figures/terminal_distributions.png",
+    "BACKTEST_PATH": "results/backtest.csv",
+    "COVERAGE_TESTS_PATH": "results/coverage_tests.csv",
+    "DIVERSIFICATION_PATH": "results/diversification.csv",
+    "EULER_CONTRIBUTIONS_PATH": "results/euler_contributions.csv",
+    "VAR_BACKTEST_FIGURE_PATH": "results/figures/var_backtest.png",
     "ARTIFACTS_DIR": "artifacts",
     "FROZEN_CONFIG_PATH": "artifacts/frozen_config.json",
     "MATPLOTLIB_CACHE_DIR": ".venv/.matplotlib",
@@ -116,10 +121,16 @@
     },
     "VAR_HORIZON_STEPS": 1,
     "VAR_CONFIDENCE": 0.99,
+    "RISK_METHODS": [
+      "parametric",
+      "historical"
+    ],
     "PARAMETRIC_SCENARIOS": 10000,
     "HISTORICAL_SCENARIOS": 500,
     "QUANTILE_METHOD": "linear",
     "TEST_SIGNIFICANCE": 0.05,
+    "COVERAGE_LIKELIHOOD_CONVENTION": "Kupiec uses all forecasts; Christoffersen conditions on the first indicator.",
+    "LATEST_RISK_CONVENTION": "Latest matched backtest forecast, identified by origin and target dates.",
     "MASTER_SEED": 42,
     "SEED_BRANCH_NAMES": [
       "forward_simulation",
@@ -7470,5 +7481,13 @@
     "position_and_portfolio_values": "USD",
     "returns": "Simple decimal returns relative to each inception value",
     "path_id": "One-based joint scenario identifier shared by every asset and the portfolio"
+  },
+  "risk_output_units": {
+    "var_and_losses": "Signed USD; loss is current value minus next-step value",
+    "pnl": "Signed USD; the negative of loss",
+    "exception_rule": "Realized loss strictly greater than forecast VaR",
+    "latest_summaries": "Latest matched backtest forecast, identified by origin and target dates.",
+    "coverage_likelihoods": "Kupiec uses all forecasts; Christoffersen conditions on the first indicator.",
+    "coverage_reference": "https://users.ssc.wisc.edu/~behansen/718/Christoffersen1998.pdf"
   }
 }

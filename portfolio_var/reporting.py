@@ -10,6 +10,7 @@ import platform
 import pandas as pd
 
 from portfolio_var import config
+from portfolio_var.risk import RollingRisk
 from portfolio_var.simulation import ForwardSimulation
 
 
@@ -45,6 +46,14 @@ def write_frozen_config() -> None:
             "position_and_portfolio_values": "USD",
             "returns": "Simple decimal returns relative to each inception value",
             "path_id": "One-based joint scenario identifier shared by every asset and the portfolio",
+        },
+        "risk_output_units": {
+            "var_and_losses": "Signed USD; loss is current value minus next-step value",
+            "pnl": "Signed USD; the negative of loss",
+            "exception_rule": "Realized loss strictly greater than forecast VaR",
+            "latest_summaries": config.LATEST_RISK_CONVENTION,
+            "coverage_likelihoods": config.COVERAGE_LIKELIHOOD_CONVENTION,
+            "coverage_reference": "https://users.ssc.wisc.edu/~behansen/718/Christoffersen1998.pdf",
         },
     }
     config.FROZEN_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -119,3 +128,73 @@ def write_terminal_reports(simulation: ForwardSimulation) -> None:
         config.TERMINAL_OUTCOMES_PATH, float_format="%.17g", lineterminator="\n",
     )
     plot_terminal_distributions(simulation)
+
+
+def plot_var_backtest(risk: RollingRisk) -> None:
+    """Compare both dated VaR forecasts with losses and method-specific exceptions."""
+    os.environ.setdefault("MPLCONFIGDIR", str(config.MATPLOTLIB_CACHE_DIR))
+    from matplotlib import dates as mdates
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    figure = Figure(figsize=(13, 9.5), facecolor="white")
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(2, 3)
+    titles = [f"{maturity:g}-year Treasury holding" for maturity in config.INITIAL_BOND_MATURITIES_YEARS.values()] + list(config.ETF_TICKERS) + ["Portfolio"]
+    for axis, asset, title in zip(axes.flat, config.ASSETS + ("portfolio",), titles):
+        asset_rows = risk.backtest.loc[risk.backtest["asset"] == asset]
+        parametric = asset_rows.loc[asset_rows["method"] == "parametric"].sort_values("forecast_date")
+        historical = asset_rows.loc[asset_rows["method"] == "historical"].sort_values("forecast_date")
+        dates = pd.to_datetime(parametric["forecast_date"])
+        axis.plot(dates, parametric["realized_loss_usd"] / 1000, color="#666666", linewidth=0.8, label="Realized loss")
+        axis.plot(dates, parametric["var_usd"] / 1000, color="#33658a", linewidth=1.25, label="Parametric 99% VaR")
+        axis.plot(pd.to_datetime(historical["forecast_date"]), historical["var_usd"] / 1000, color="#c47b20", linewidth=1.25, label="Historical 99% VaR")
+        parametric_hits = parametric.loc[parametric["exception"]]
+        historical_hits = historical.loc[historical["exception"]]
+        axis.scatter(pd.to_datetime(parametric_hits["forecast_date"]), parametric_hits["realized_loss_usd"] / 1000, marker="o", s=45, facecolors="none", edgecolors="#33658a", linewidths=1.3, zorder=4, label="Parametric exception")
+        axis.scatter(pd.to_datetime(historical_hits["forecast_date"]), historical_hits["realized_loss_usd"] / 1000, marker="x", s=30, color="#c47b20", linewidths=1.2, zorder=5, label="Historical exception")
+        axis.axhline(0, color="#888888", linewidth=0.6)
+        axis.set_title(title, fontsize=11, pad=9)
+        axis.set_ylabel("Loss / VaR (USD thousands)", fontsize=9)
+        axis.tick_params(labelsize=9)
+        axis.text(0.02, 0.96, f"Exceptions: P {len(parametric_hits)} / H {len(historical_hits)}", transform=axis.transAxes, va="top", fontsize=8, bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"})
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=5)
+        axis.xaxis.set_major_locator(locator)
+        axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", alpha=0.2)
+        axis.spines[["top", "right"]].set_visible(False)
+    dates = pd.to_datetime(risk.backtest["forecast_date"])
+    count = risk.backtest["forecast_date"].nunique()
+    figure.suptitle("99% one-step VaR backtest", fontsize=17, y=0.98)
+    figure.text(
+        0.5, 0.942,
+        f"{count} matched forecasts: {dates.min().date()} to {dates.max().date()} | "
+        f"{config.ESTIMATION_WINDOW} preceding changes at each origin\n"
+        f"Fixed portfolio inception {risk.holdings.inception_date}; Treasury maturities shown at inception",
+        ha="center", va="center", fontsize=10, color="#444444",
+    )
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.908), ncol=3, frameon=False, fontsize=9)
+    figure.text(
+        0.5, 0.025,
+        "Loss = current value minus next-step value. Markers show strict exceedances of the matching VaR.\n"
+        "Bonds age at each retained observation; positions stay fixed. Each retained interval is one trading step.",
+        ha="center", va="center", fontsize=9, color="#444444",
+    )
+    figure.subplots_adjust(left=0.075, right=0.975, bottom=0.105, top=0.805, wspace=0.30, hspace=0.40)
+    config.VAR_BACKTEST_FIGURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(config.VAR_BACKTEST_FIGURE_PATH, dpi=160)
+
+
+def write_risk_reports(risk: RollingRisk) -> None:
+    """Persist matched forecasts, all test outputs, and latest risk summaries."""
+    for path, table in (
+        (config.BACKTEST_PATH, risk.backtest),
+        (config.COVERAGE_TESTS_PATH, risk.coverage_tests),
+        (config.DIVERSIFICATION_PATH, risk.diversification),
+        (config.EULER_CONTRIBUTIONS_PATH, risk.euler_contributions),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_csv(path, index=False, float_format="%.17g", lineterminator="\n")
+    plot_var_backtest(risk)
