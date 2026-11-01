@@ -1,0 +1,35 @@
+# Supplied local instructions.
+/multi_asset_portfolio_simulation_var_mvp_brief.md
+/skills.md
+
+# Local Python environments and credentials.
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+!.env.template
+.credentials
+.credentials.*
+credentials*.json
+secrets.json
+secrets.*.json
+*.pem
+*.key
+.aws/
+
+# Python caches and generated packaging.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.eggs/
+*.egg
+*.egg-info/
+build/
+dist/
+
+# Retained input snapshots stay local until redistribution is established.
+/data/
